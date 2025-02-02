@@ -1,11 +1,9 @@
-// Version 5
-// New functions: parse_operator, set_cell_value
-// Modified functions: handle_command
-// - The set_cell_value function now handles arithmetic operations of type value exp value.
-// - The handle_command function now handles arithmetic operations of type value exp value.
-// Errors:
-    // - The set_cell_value function now handles division by zero.
-    // - If invalid operations / value assigned to a cell then it gives shows ERR on the cell plus the error message in command line.
+// Version 7
+// Improvements over code_6.c:
+// - New functions added - evaluate_sum_and_count
+// - Updated set_cell_value function to handle SUM and AVG functions
+// - Updated handle_command function to handle new commands
+// - Typical error handling and status messages
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,19 +11,23 @@
 #include <stdbool.h>
 #include <ctype.h>
 #include <time.h>  // Standard C timing
+#include <limits.h> // For INT_MAX and INT_MIN
 
 #define MAX_ROWS 999
 #define MAX_COLS 18278
 #define VIEWPORT_SIZE 10
 
 // Add status enumeration
+// Added these new error statuses to the enum
+// version 2
 typedef enum {
     CMD_OK,
     CMD_UNRECOGNIZED,
     CMD_INVALID_CELL,
     CMD_INVALID_RANGE,
     CMD_CIRCULAR_REF,
-    CMD_DIV_BY_ZERO
+    CMD_DIV_BY_ZERO,
+    CMD_RANGE_ERROR
 } CommandStatus;
 
 // Define the cell structure
@@ -46,6 +48,14 @@ typedef struct {
     int viewport_col;
     bool output_enabled;
 } Spreadsheet;
+
+// Add range parsing and validation functions
+typedef struct {
+    int start_row;
+    int start_col;
+    int end_row;
+    int end_col;
+} Range;
 
 // Function to get column name
 char* get_column_name(int col) {
@@ -223,15 +233,112 @@ void scroll_viewport(Spreadsheet* sheet, char direction) {
     }
 }
 
-// Function to evaluate an expression
-int eval_expression(Spreadsheet* sheet, int row, int col, const char* expr) {
-    // Implement expression evaluation
-    return 0; // Placeholder
+// // Function to evaluate an expression
+// int eval_expression(Spreadsheet* sheet, int row, int col, const char* expr) {
+//     // Implement expression evaluation
+//     return 0; // Placeholder
+// }
+
+// // Function to update dependencies
+// void update_dependencies(Spreadsheet* sheet, int row, int col) {
+//     // Implement dependency graph updates
+// }
+
+// Function to parse a range
+CommandStatus parse_range(const char* range_str, Range* range) {
+    char* colon = strchr(range_str, ':');
+    if (!colon || colon == range_str || colon[1] == '\0') {
+        return CMD_INVALID_RANGE;
+    }
+
+    char start_cell[20];
+    char end_cell[20];
+    strncpy(start_cell, range_str, colon - range_str);
+    start_cell[colon - range_str] = '\0';
+    strcpy(end_cell, colon + 1);
+
+    // Parse start cell
+    parse_cell_reference(start_cell, &range->start_row, &range->start_col);
+    if (range->start_row < 0 || range->start_col < 0) {
+        return CMD_INVALID_CELL;
+    }
+
+    // Parse end cell
+    parse_cell_reference(end_cell, &range->end_row, &range->end_col);
+    if (range->end_row < 0 || range->end_col < 0) {
+        return CMD_INVALID_CELL;
+    }
+
+    // Validate range order
+    if (range->start_row > range->end_row || range->start_col > range->end_col) {
+        return CMD_INVALID_RANGE;
+    }
+
+    return CMD_OK;
 }
 
-// Function to update dependencies
-void update_dependencies(Spreadsheet* sheet, int row, int col) {
-    // Implement dependency graph updates
+// Function to evaluate a range
+CommandStatus evaluate_range(Spreadsheet* sheet, Range range, int* result, bool is_min) {
+    int min_max = is_min ? INT_MAX : INT_MIN;
+    bool error_found = false;
+
+    for (int row = range.start_row; row <= range.end_row; row++) {
+        for (int col = range.start_col; col <= range.end_col; col++) {
+            if (row >= sheet->rows || col >= sheet->cols) {
+                return CMD_INVALID_RANGE;
+            }
+
+            if (sheet->grid[row][col]->error_state) {
+                error_found = true;
+                break;
+            }
+
+            int val = sheet->grid[row][col]->value;
+            if (is_min) {
+                min_max = (val < min_max) ? val : min_max;
+            } else {
+                min_max = (val > min_max) ? val : min_max;
+            }
+        }
+        if (error_found) break;
+    }
+
+    if (error_found) {
+        return CMD_RANGE_ERROR;
+    }
+
+    *result = min_max;
+    return CMD_OK;
+}
+
+// Function to evaluate sum and count of a range
+CommandStatus evaluate_sum_and_count(Spreadsheet* sheet, Range range, int* sum, int* count) {
+    *sum = 0;
+    *count = 0;
+    bool error_found = false;
+
+    for (int row = range.start_row; row <= range.end_row; row++) {
+        for (int col = range.start_col; col <= range.end_col; col++) {
+            if (row >= sheet->rows || col >= sheet->cols) {
+                return CMD_INVALID_RANGE;
+            }
+
+            if (sheet->grid[row][col]->error_state) {
+                error_found = true;
+                break;
+            }
+
+            *sum += sheet->grid[row][col]->value;
+            (*count)++;
+        }
+        if (error_found) break;
+    }
+
+    if (error_found) {
+        return CMD_RANGE_ERROR;
+    }
+
+    return CMD_OK;
 }
 
 // Function to set cell value
@@ -247,6 +354,60 @@ CommandStatus set_cell_value(Spreadsheet* sheet, int row, int col, const char* e
         return CMD_OK;
     }
     
+    // Handle SUM and AVG functions
+    else if (strncmp(expr, "SUM(", 4) == 0 || strncmp(expr, "AVG(", 4) == 0) {
+        bool is_sum = (expr[0] == 'S');
+        char range_str[100];
+        strncpy(range_str, expr + 4, strlen(expr) - 5);
+        range_str[strlen(expr) - 5] = '\0';
+
+        Range range;
+        CommandStatus status = parse_range(range_str, &range);
+        if (status != CMD_OK) {
+            return status;
+        }
+
+        int total, count;
+        status = evaluate_sum_and_count(sheet, range, &total, &count);
+        if (status == CMD_OK) {
+            if (is_sum) {
+                sheet->grid[row][col]->value = total;
+            } else {
+                sheet->grid[row][col]->value = total / count;
+            }
+            sheet->grid[row][col]->error_state = 0;
+        } else {
+            sheet->grid[row][col]->error_state = 1;
+            return status;
+        }
+        return CMD_OK;
+    }
+
+    // Handle MIN and MAX functions
+    if (strncmp(expr, "MIN(", 4) == 0 || strncmp(expr, "MAX(", 4) == 0) {
+        bool is_min = (expr[0] == 'M' && expr[1] == 'I');
+        char range_str[100];
+        strncpy(range_str, expr + 4, strlen(expr) - 5); // Remove MIN( or MAX( and )
+        range_str[strlen(expr) - 5] = '\0';
+
+        Range range;
+        CommandStatus status = parse_range(range_str, &range);
+        if (status != CMD_OK) {
+            return status;
+        }
+
+        int result;
+        status = evaluate_range(sheet, range, &result, is_min);
+        if (status == CMD_OK) {
+            sheet->grid[row][col]->value = result;
+            sheet->grid[row][col]->error_state = 0;
+        } else if (status == CMD_RANGE_ERROR) {
+            sheet->grid[row][col]->error_state = 1;
+            return CMD_RANGE_ERROR;
+        }
+            return status;
+    }
+
     // Handle arithmetic operations
     int a, b;
     char op;
@@ -295,6 +456,7 @@ CommandStatus handle_command(Spreadsheet* sheet, const char* cmd) {
     } else if (strncmp(cmd, "scroll_to ", 10) == 0) {
         return scroll_to_cell(sheet, cmd + 10);
     }
+    
     // Handle cell assignments
     char* eq = strchr(cmd, '=');
     if(eq != NULL) {
@@ -372,6 +534,7 @@ int main(int argc, char* argv[]) {
             case CMD_INVALID_RANGE: last_status = "invalid range"; break;
             case CMD_CIRCULAR_REF: last_status = "circular ref"; break;
             case CMD_DIV_BY_ZERO: last_status = "div by zero"; break;
+            case CMD_RANGE_ERROR: last_status = "range error"; break;
             default: last_status = "error";
         }
     }
