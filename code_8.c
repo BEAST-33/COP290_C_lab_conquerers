@@ -13,6 +13,8 @@
 #include <time.h>  // Standard C timing
 #include <limits.h> // For INT_MAX and INT_MIN
 #include <pthread.h> // For threading
+#include <unistd.h>
+
 
 #define MAX_ROWS 999
 #define MAX_COLS 18278

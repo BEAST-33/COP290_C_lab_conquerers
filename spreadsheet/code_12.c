@@ -1,12 +1,8 @@
 /*
-  sheet.c – A Spreadsheet Program for COP290 C Lab
-
-  This program implements a spreadsheet with dependency tracking, formula parsing,
-  and functions including arithmetic, MIN, MAX, SUM, AVG, and SLEEP. SLEEP(n)
-  sleeps the program for n seconds and returns n. The program also measures and prints
-  real (wall-clock) elapsed time for each command.
-
-  Compile with: gcc -Wall -Wextra -std=c11 sheet.c -o sheet -lm -pthread
+    This program implements a spreadsheet with dependency tracking, formula parsing,
+    and functions including arithmetic, MIN, MAX, SUM, AVG, and SLEEP. SLEEP(n)
+    sleeps the program for n seconds and returns n. The program also measures and prints
+    real (wall-clock) elapsed time for each command.
 */
 
 #include <stdio.h>
@@ -50,6 +46,8 @@ int evaluate_cell_reference(Spreadsheet* sheet, const char* token, Cell* current
 
 // Cell structure with dependency tracking.
 struct Cell {
+    int row;
+    int col;
     int value;
     char* formula;
     int error_state;       // 0 = OK, 1 = error.
@@ -143,6 +141,8 @@ Spreadsheet* create_spreadsheet(int rows, int cols) {
         sheet->grid[i] = malloc(cols * sizeof(Cell*));
         for (int j = 0; j < cols; j++) {
             sheet->grid[i][j] = calloc(1, sizeof(Cell));
+            sheet->grid[i][j]->row = i;
+            sheet->grid[i][j]->col = j;
             sheet->grid[i][j]->value = 0;
             sheet->grid[i][j]->formula = NULL;
             sheet->grid[i][j]->error_state = 0;
@@ -323,17 +323,21 @@ CommandStatus evaluate_sum_and_count(Spreadsheet* sheet, Range range, int* sum, 
 int evaluate_cell_reference(Spreadsheet* sheet, const char* token, Cell* current_cell) {
     char* endptr;
     int value = strtol(token, &endptr, 10);
-    if (*endptr == '\0')
-        return value;
+    if (*endptr == '\0') return value;
+
     int ref_row, ref_col;
     parse_cell_reference(token, &ref_row, &ref_col);
-    if (ref_row < 0 || ref_col < 0 || ref_row >= sheet->rows || ref_col >= sheet->cols)
+    if (ref_row < 0 || ref_col < 0 || ref_row >= sheet->rows || ref_col >= sheet->cols) {
+        current_cell->error_state = 1; // Mark error for invalid reference
         return 0;
+    }
+
     Cell* ref_cell = sheet->grid[ref_row][ref_col];
     if (detect_cycle(ref_cell, current_cell)) {
         current_cell->error_state = 1;
         return 0;
     }
+
     add_dependency(current_cell, ref_cell);
     return ref_cell->value;
 }
@@ -352,8 +356,10 @@ CommandStatus evaluate_arithmetic(Spreadsheet* sheet, Cell* cell, const char* ex
         return CMD_UNRECOGNIZED;
     op = expr[pos++];
     strcpy(second, expr + pos);
-    int val1 = isalpha(first[0]) ? evaluate_cell_reference(sheet, first, cell) : atoi(first);
-    int val2 = isalpha(second[0]) ? evaluate_cell_reference(sheet, second, cell) : atoi(second);
+    int val1 = evaluate_cell_reference(sheet, first, cell);
+    if (cell->error_state) return CMD_CIRCULAR_REF;
+    int val2 = evaluate_cell_reference(sheet, second, cell);
+    if (cell->error_state) return CMD_CIRCULAR_REF;
     switch(op) {
         case '+': cell->value = val1 + val2; break;
         case '-': cell->value = val1 - val2; break;
@@ -456,12 +462,21 @@ void* sleep_wrapper(void* arg) {
 
 // Evaluates SLEEP(n): sleeps for n seconds (using a separate thread) and returns n.
 CommandStatus evaluate_sleep(Spreadsheet* sheet, Cell* cell, const char* expr) {
-    char* endptr;
-    int duration = strtol(expr + 6, &endptr, 10);  // Skip "SLEEP("
-    if (*endptr != ')') {
+    int len = strlen(expr);
+    if (len < 7 || expr[len-1] != ')') {
         cell->error_state = 1;
         return CMD_UNRECOGNIZED;
     }
+
+    char arg_str[256];
+    strncpy(arg_str, expr + 6, len - 7);
+    arg_str[len - 7] = '\0';
+
+    int duration = evaluate_cell_reference(sheet, arg_str, cell);
+    if (cell->error_state) {
+        return CMD_CIRCULAR_REF;
+    }
+
     pthread_t thread;
     int* arg = malloc(sizeof(int));
     *arg = duration;
@@ -470,8 +485,9 @@ CommandStatus evaluate_sleep(Spreadsheet* sheet, Cell* cell, const char* expr) {
         cell->error_state = 1;
         return CMD_UNRECOGNIZED;
     }
-    pthread_join(thread, NULL);  // Wait for sleep to complete.
+    pthread_join(thread, NULL);
     free(arg);
+
     cell->value = duration;
     cell->error_state = 0;
     return CMD_OK;
@@ -488,9 +504,15 @@ CommandStatus set_cell_value(Spreadsheet* sheet, int row, int col, const char* e
     char* end;
     long value = strtol(expr, &end, 10);
     if (*end == '\0') {
+        free(cell->formula);
+        cell->formula = NULL;
         cell->value = value;
         return CMD_OK;
     }
+    
+    // Store the formula for non-constant values
+    free(cell->formula);
+    cell->formula = strdup(expr);
     
     // Handle SUM/AVG, MIN/MAX, SLEEP via evaluate_function.
     if (strncmp(expr, "SUM(", 4) == 0 || strncmp(expr, "AVG(", 4) == 0 ||
@@ -526,6 +548,158 @@ CommandStatus set_cell_value(Spreadsheet* sheet, int row, int col, const char* e
 
 /*------------------- Command Handling -------------------*/
 
+void get_all_dependents(Spreadsheet* sheet, Cell* start, Cell*** dependents_list, int* count) {
+    *dependents_list = NULL;
+    *count = 0;
+
+    if (start->dependent_count == 0) return; // No dependents to process
+
+    // Use a hash table to track visited cells more efficiently
+    bool** visited = (bool**)calloc(sheet->rows, sizeof(bool*));
+    for (int i = 0; i < sheet->rows; i++) {
+        visited[i] = (bool*)calloc(sheet->cols, sizeof(bool));
+    }
+
+    // Initialize dynamic array for dependents
+    int capacity = 10;
+    Cell** deps = malloc(capacity * sizeof(Cell*));
+    
+    // Use a queue for BFS (start with direct dependents of 'start')
+    Cell** queue = malloc(sheet->rows * sheet->cols * sizeof(Cell*));
+    int front = 0, rear = 0;
+    
+    // Initialize queue with direct dependents of the modified cell
+    for (int i = 0; i < start->dependent_count; i++) {
+        Cell* dependent = start->dependents[i];
+        if (!visited[dependent->row][dependent->col]) {
+            visited[dependent->row][dependent->col] = true;
+            queue[rear++] = dependent;
+            
+            // Add to dependents list
+            if (*count >= capacity) {
+                capacity *= 2;
+                deps = realloc(deps, capacity * sizeof(Cell*));
+            }
+            deps[*count] = dependent;
+            (*count)++;
+        }
+    }
+    
+    // Perform BFS to find all indirect dependents
+    while (front < rear) {
+        Cell* current = queue[front++];
+        
+        // Add all direct dependents of 'current' to queue
+        for (int i = 0; i < current->dependent_count; i++) {
+            Cell* dependent = current->dependents[i];
+            if (!visited[dependent->row][dependent->col]) {
+                visited[dependent->row][dependent->col] = true;
+                queue[rear++] = dependent;
+                
+                // Add to dependents list
+                if (*count >= capacity) {
+                    capacity *= 2;
+                    deps = realloc(deps, capacity * sizeof(Cell*));
+                }
+                deps[*count] = dependent;
+                (*count)++;
+            }
+        }
+    }
+    
+    // Allocate and return final list
+    *dependents_list = malloc(*count * sizeof(Cell*));
+    memcpy(*dependents_list, deps, *count * sizeof(Cell*));
+    
+    // Cleanup
+    for (int i = 0; i < sheet->rows; i++) {
+        free(visited[i]);
+    }
+    free(visited);
+    free(queue);
+    free(deps);
+}
+
+Cell** topological_sort(Cell** dependents, int count, int* sorted_count) {
+    *sorted_count = 0;
+    if (count == 0) return NULL;
+
+    // Track in-degree for each cell (number of unresolved dependencies)
+    int* in_degree = calloc(count, sizeof(int));
+    Cell** sorted = malloc(count * sizeof(Cell*));
+
+    // Calculate initial in-degree
+    for (int i = 0; i < count; i++) {
+        Cell* cell = dependents[i];
+        in_degree[i] = 0;
+        for (int j = 0; j < cell->dep_count; j++) {
+            Cell* dep = cell->dependencies[j];
+            // Check if the dependency is in the dependents list
+            for (int k = 0; k < count; k++) {
+                if (dependents[k] == dep) {
+                    in_degree[i]++;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Initialize queue with cells having in_degree 0
+    int* queue = malloc(count * sizeof(int));
+    int front = 0, rear = 0;
+    for (int i = 0; i < count; i++) {
+        if (in_degree[i] == 0) {
+            queue[rear++] = i;
+        }
+    }
+
+    // Process queue
+    while (front < rear) {
+        int idx = queue[front++];
+        Cell* cell = dependents[idx];
+        sorted[(*sorted_count)++] = cell;
+
+        // Reduce in_degree for dependents
+        for (int i = 0; i < cell->dependent_count; i++) {
+            Cell* dependent = cell->dependents[i];
+            for (int k = 0; k < count; k++) {
+                if (dependents[k] == dependent) {
+                    in_degree[k]--;
+                    if (in_degree[k] == 0) {
+                        queue[rear++] = k;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    free(in_degree);
+    free(queue);
+    return sorted;
+}
+
+void propagate_changes(Spreadsheet* sheet, Cell* modified_cell) {
+    Cell** dependents;
+    int count;
+    get_all_dependents(sheet, modified_cell, &dependents, &count);
+
+    int sorted_count;
+    Cell** sorted = topological_sort(dependents, count, &sorted_count);
+
+    for (int i = 0; i < sorted_count; i++) {
+        Cell* cell = sorted[i];
+        if (cell->formula) {
+            // Clear dependencies before re-evaluating to avoid stale references
+            remove_dependencies(cell);
+            cell->error_state = 0;
+            set_cell_value(sheet, cell->row, cell->col, cell->formula);
+        }
+    }
+
+    free(dependents);
+    free(sorted);
+}
 CommandStatus handle_command(Spreadsheet* sheet, const char* cmd) {
     if (strcmp(cmd, "disable_output") == 0) {
         sheet->output_enabled = false;
@@ -550,7 +724,11 @@ CommandStatus handle_command(Spreadsheet* sheet, const char* cmd) {
         if (row < 0 || row >= sheet->rows || col < 0 || col >= sheet->cols)
             return CMD_INVALID_CELL;
         const char* expr = eq + 1;
-        return set_cell_value(sheet, row, col, expr);
+        CommandStatus status = set_cell_value(sheet, row, col, expr);
+        if (status == CMD_OK) {
+            propagate_changes(sheet, sheet->grid[row][col]);
+        }
+        return status;
     }
     return CMD_UNRECOGNIZED;
 }
@@ -597,9 +775,9 @@ int main(int argc, char* argv[]) {
         if (strcmp(input, "q") == 0)
             break;
         
-        clock_gettime(CLOCK_REALTIME, &start); // Start timing (wall clock)
+        clock_gettime(CLOCK_REALTIME, &start);
         CommandStatus status = handle_command(sheet, input);
-        clock_gettime(CLOCK_REALTIME, &finish); // End timing
+        clock_gettime(CLOCK_REALTIME, &finish);
         
         last_time = (finish.tv_sec - start.tv_sec) +
                     (finish.tv_nsec - start.tv_nsec) / 1e9;

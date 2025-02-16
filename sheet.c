@@ -10,8 +10,8 @@
 #include <stdbool.h>
 #include <ctype.h>
 #include <time.h>
-#include <pthread.h>
-#include <assert.h>
+
+
 
 #define MAX_ROWS 999
 #define MAX_COLS 18278
