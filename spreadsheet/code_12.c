@@ -52,7 +52,7 @@ struct Cell {
     char* formula;
     int error_state;       // 0 = OK, 1 = error.
     Cell** dependencies;   // Cells this cell depends on.
-    int dep_count;
+    int dependencies_count;
     Cell** dependents;     // Cells that depend on this cell.
     int dependent_count;
 };
@@ -147,7 +147,7 @@ Spreadsheet* create_spreadsheet(int rows, int cols) {
             sheet->grid[i][j]->formula = NULL;
             sheet->grid[i][j]->error_state = 0;
             sheet->grid[i][j]->dependencies = NULL;
-            sheet->grid[i][j]->dep_count = 0;
+            sheet->grid[i][j]->dependencies_count = 0;
             sheet->grid[i][j]->dependents = NULL;
             sheet->grid[i][j]->dependent_count = 0;
         }
@@ -216,16 +216,26 @@ CommandStatus scroll_to_cell(Spreadsheet* sheet, const char* cell) {
 /*------------------- Dependency Management -------------------*/
 
 void add_dependency(Cell* dependent, Cell* dependency) {
-    dependency->dependents = realloc(dependency->dependents,
+    // Temporary pointer for safe realloc
+    Cell** temp;
+    
+    // Reallocate dependency's dependents array
+    temp = realloc(dependency->dependents, 
         (dependency->dependent_count + 1) * sizeof(Cell*));
+    if (!temp) return;  // Handle realloc failure
+    dependency->dependents = temp;
     dependency->dependents[dependency->dependent_count++] = dependent;
-    dependent->dependencies = realloc(dependent->dependencies,
-        (dependent->dep_count + 1) * sizeof(Cell*));
-    dependent->dependencies[dependent->dep_count++] = dependency;
+    
+    // Reallocate dependent's dependencies array
+    temp = realloc(dependent->dependencies,
+        (dependent->dependencies_count + 1) * sizeof(Cell*));
+    if (!temp) return;  // Handle realloc failure
+    dependent->dependencies = temp;
+    dependent->dependencies[dependent->dependencies_count++] = dependency;
 }
 
 void remove_dependencies(Cell* cell) {
-    for (int i = 0; i < cell->dep_count; i++) {
+    for (int i = 0; i < cell->dependencies_count; i++) {
         Cell* dep = cell->dependencies[i];
         for (int j = 0; j < dep->dependent_count; j++) {
             if (dep->dependents[j] == cell) {
@@ -237,19 +247,45 @@ void remove_dependencies(Cell* cell) {
     }
     free(cell->dependencies);
     cell->dependencies = NULL;
-    cell->dep_count = 0;
+    cell->dependencies_count = 0;
 }
 
-int detect_cycle(Cell* current, Cell* target) {
-    if (current == target)
-        return 1;
-    for (int i = 0; i < current->dep_count; i++) {
-        if (detect_cycle(current->dependencies[i], target))
-            return 1;
+typedef struct {
+    Cell** cells;
+    int count;
+} VisitedCells;
+
+int detect_cycle_improved(Cell* current, Cell* target, VisitedCells* visited) {
+    // Check if current cell was already visited
+    for (int i = 0; i < visited->count; i++) {
+        if (visited->cells[i] == current) {
+            return 1;  // Cycle detected
+        }
     }
+    
+    // Add current cell to visited list
+    visited->cells = realloc(visited->cells, (visited->count + 1) * sizeof(Cell*));
+    if (!visited->cells) return 0;
+    visited->cells[visited->count++] = current;
+    
+    // Check dependencies
+    for (int i = 0; i < current->dependencies_count; i++) {
+        if (detect_cycle_improved(current->dependencies[i], target, visited)) {
+            return 1;
+        }
+    }
+    
+    // Remove current cell from visited list before backtracking
+    visited->count--;
     return 0;
 }
 
+int detect_cycle(Cell* current, Cell* target) {
+    VisitedCells visited = {NULL, 0};
+    int result = detect_cycle_improved(current, target, &visited);
+    free(visited.cells);
+    return result;
+}
 /*------------------- Range Parsing and Evaluation -------------------*/
 
 CommandStatus parse_range(const char* range_str, Range* range) {
@@ -552,72 +588,78 @@ void get_all_dependents(Spreadsheet* sheet, Cell* start, Cell*** dependents_list
     *dependents_list = NULL;
     *count = 0;
 
-    if (start->dependent_count == 0) return; // No dependents to process
+    if (start->dependent_count == 0) return;
 
-    // Use a hash table to track visited cells more efficiently
     bool** visited = (bool**)calloc(sheet->rows, sizeof(bool*));
     for (int i = 0; i < sheet->rows; i++) {
         visited[i] = (bool*)calloc(sheet->cols, sizeof(bool));
     }
 
-    // Initialize dynamic array for dependents
-    int capacity = 10;
-    Cell** deps = malloc(capacity * sizeof(Cell*));
-    
-    // Use a queue for BFS (start with direct dependents of 'start')
-    Cell** queue = malloc(sheet->rows * sheet->cols * sizeof(Cell*));
+    int deps_capacity = 10;
+    Cell** deps = malloc(deps_capacity * sizeof(Cell*));
+    int deps_count = 0;
+
+    int queue_capacity = 10;
+    Cell** queue = malloc(queue_capacity * sizeof(Cell*));
     int front = 0, rear = 0;
-    
-    // Initialize queue with direct dependents of the modified cell
+
+    // Initialize queue with direct dependents of 'start'
     for (int i = 0; i < start->dependent_count; i++) {
         Cell* dependent = start->dependents[i];
         if (!visited[dependent->row][dependent->col]) {
             visited[dependent->row][dependent->col] = true;
-            queue[rear++] = dependent;
-            
-            // Add to dependents list
-            if (*count >= capacity) {
-                capacity *= 2;
-                deps = realloc(deps, capacity * sizeof(Cell*));
+            // Expand queue if needed
+            if (rear >= queue_capacity) {
+                queue_capacity *= 2;
+                queue = realloc(queue, queue_capacity * sizeof(Cell*));
             }
-            deps[*count] = dependent;
-            (*count)++;
+            queue[rear++] = dependent;
+
+            // Add to deps list
+            if (deps_count >= deps_capacity) {
+                deps_capacity *= 2;
+                deps = realloc(deps, deps_capacity * sizeof(Cell*));
+            }
+            deps[deps_count++] = dependent;
         }
     }
-    
-    // Perform BFS to find all indirect dependents
+
+    // Process queue
     while (front < rear) {
         Cell* current = queue[front++];
-        
-        // Add all direct dependents of 'current' to queue
+
         for (int i = 0; i < current->dependent_count; i++) {
             Cell* dependent = current->dependents[i];
             if (!visited[dependent->row][dependent->col]) {
                 visited[dependent->row][dependent->col] = true;
-                queue[rear++] = dependent;
-                
-                // Add to dependents list
-                if (*count >= capacity) {
-                    capacity *= 2;
-                    deps = realloc(deps, capacity * sizeof(Cell*));
+
+                // Expand queue if needed
+                if (rear >= queue_capacity) {
+                    queue_capacity *= 2;
+                    queue = realloc(queue, queue_capacity * sizeof(Cell*));
                 }
-                deps[*count] = dependent;
-                (*count)++;
+                queue[rear++] = dependent;
+
+                // Add to deps list
+                if (deps_count >= deps_capacity) {
+                    deps_capacity *= 2;
+                    deps = realloc(deps, deps_capacity * sizeof(Cell*));
+                }
+                deps[deps_count++] = dependent;
             }
         }
     }
-    
-    // Allocate and return final list
-    *dependents_list = malloc(*count * sizeof(Cell*));
-    memcpy(*dependents_list, deps, *count * sizeof(Cell*));
-    
+
+    // Assign results
+    *dependents_list = deps;
+    *count = deps_count;
+
     // Cleanup
     for (int i = 0; i < sheet->rows; i++) {
         free(visited[i]);
     }
     free(visited);
     free(queue);
-    free(deps);
 }
 
 Cell** topological_sort(Cell** dependents, int count, int* sorted_count) {
@@ -632,7 +674,7 @@ Cell** topological_sort(Cell** dependents, int count, int* sorted_count) {
     for (int i = 0; i < count; i++) {
         Cell* cell = dependents[i];
         in_degree[i] = 0;
-        for (int j = 0; j < cell->dep_count; j++) {
+        for (int j = 0; j < cell->dependencies_count; j++) {
             Cell* dep = cell->dependencies[j];
             // Check if the dependency is in the dependents list
             for (int k = 0; k < count; k++) {
@@ -700,6 +742,7 @@ void propagate_changes(Spreadsheet* sheet, Cell* modified_cell) {
     free(dependents);
     free(sorted);
 }
+
 CommandStatus handle_command(Spreadsheet* sheet, const char* cmd) {
     if (strcmp(cmd, "disable_output") == 0) {
         sheet->output_enabled = false;
