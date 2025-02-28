@@ -1,6 +1,6 @@
 /*
     This program implements a spreadsheet with dependency tracking, formula parsing,
-    and functions including arithmetic, MIN, MAX, SUM, AVG, and SLEEP. SLEEP(n)
+    and functions including arithmetic,e MIN, MAX, SUM, AVG, and SLEEP. SLEEP(n)
     sleeps the program for n seconds and returns n. The program also measures and prints
     real (wall-clock) elapsed time for each command.
 */
@@ -10,7 +10,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>         // For clock_gettime
-#include <limits.h>       // For INT_MAX and INT_MIN
+#include <limits.h>       // For INT_MAX and INT_MINn
 #include <pthread.h>      // For threading
 #include <unistd.h>       // For sleep
 #include <stdbool.h>
@@ -37,7 +37,7 @@ typedef struct Spreadsheet Spreadsheet;
 typedef struct Range Range;
 
 void add_dependency(Cell* dependent, Cell* dependency);
-void remove_dependencies(Cell* cell);
+void  remove_dependencies(Cell* cell);
 int detect_cycle(Cell* current, Cell* target);
 CommandStatus evaluate_arithmetic(Spreadsheet* sheet, Cell* cell, const char* expr);
 CommandStatus evaluate_function(Spreadsheet* sheet, Cell* cell, const char* expr);
@@ -674,13 +674,14 @@ Cell** topological_sort(Cell** dependents, int count, int* sorted_count) {
     for (int i = 0; i < count; i++) {
         Cell* cell = dependents[i];
         in_degree[i] = 0;
+        // Only count dependencies that are in our working set
         for (int j = 0; j < cell->dependencies_count; j++) {
             Cell* dep = cell->dependencies[j];
-            // Check if the dependency is in the dependents list
+            // Check if dependency is in our subset of cells to sort
             for (int k = 0; k < count; k++) {
                 if (dependents[k] == dep) {
                     in_degree[i]++;
-                    break;
+                    break;  // Found in list, no need to continue searching
                 }
             }
         }
