@@ -36,18 +36,18 @@ typedef struct {
 
 // Optimized Cell structure.
 // __attribute__((packed)) minimizes padding.
-typedef struct Cell {
-    AVLTree *children;   // 8 bytes (AVL tree for children)
-    int cell1;
-    int cell2;
-    int value;          // 4 bytes
-    short formula;
+typedef struct __attribute__((packed)) Cell {
+    AVLTree children;   // 8 bytes (AVL tree for children)
+    int cell1;           // Stores parent cell key or start of range or custom value
+    int cell2;           // Stores parent cell key or end of range or custom value
+    int value;          // stores the value of the cell
+    short formula;      // stores the formula code
     bool error_state;  // 1 byte
 } Cell;
 // Formula codes
 // -1: No formula
-// 80: Simple cell reference
-// 10: Add both cells 
+// 82: Simple cell reference
+// 10: Add with both cells 
 // 20: Sub ''
 // 30: Div ''
 // 40: Mult ''
@@ -59,12 +59,12 @@ typedef struct Cell {
 // 23: Sub ''
 // 33: Div '' 
 // 43: Mult ''
-// 5: SUM
+// 5: SUM in Range cell1 to cell2
 // 6: AVG
 // 7: MIN
 // 8: MAX
 // 9: STDEV
-// 101: SLEEP
+// 102: SLEEP with cell reference
 
 // Spreadsheet structure now uses a contiguous array for grid.
 typedef struct {
@@ -89,6 +89,10 @@ CommandStatus reevaluate_formula(Spreadsheet* sheet, Cell* cell, double* sleep_t
 // Returns pointer to cell at (row, col).
 static inline Cell* get_cell(Spreadsheet* sheet, short row, short col) {
     return &(sheet->grid[(int)(row * sheet->cols + col)]);
+}
+
+Cell* get_cell_check(Spreadsheet* sheet, int index){
+    return &(sheet->grid[index]);
 }
 
 // Helper: encode (row, col) as an integer key.
@@ -117,6 +121,10 @@ void remove_child(Cell* parent, int key) {
 void remove_all_parents(Spreadsheet *sheet, short row, short col){
     int key = encode_cell_key(row, col, sheet->cols);
     Cell* child = get_cell(sheet, row, col);
+    if(child->formula==-1){
+        return;
+    }
+    short rem = child->formula%10;
     if(child->formula<=9 && child->formula>=5){
         Range range;
         range.start_row = child->cell1/sheet->cols;
@@ -130,118 +138,289 @@ void remove_all_parents(Spreadsheet *sheet, short row, short col){
             }
         }
     }
-    else if(child->formula==101){
-        Cell* ref_cell = get_cell(sheet, child->cell1/sheet->cols, child->cell1%sheet->cols);
-        remove_child(ref_cell, key);
+    else if(rem==0){
+        Cell* ref_cell1 = get_cell(sheet, child->cell1/sheet->cols, child->cell1%sheet->cols);
+        Cell* ref_cell2 = get_cell(sheet, child->cell2/sheet->cols, child->cell2%sheet->cols);
+        remove_child(ref_cell1, key);
+        remove_child(ref_cell2, key);
     }
-    // else if()
+    else if(rem==2){
+        Cell* ref_cell1 = get_cell(sheet, child->cell1/sheet->cols, child->cell1%sheet->cols);
+        remove_child(ref_cell1, key);
+    }
+    else if(rem==3){
+        Cell* ref_cell2 = get_cell(sheet, child->cell2/sheet->cols, child->cell2%sheet->cols);
+        remove_child(ref_cell2, key);
+    }
 }
 
-/* 
-   (Additional functions such as reevaluate_topologically, evaluate_formula, 
-     and others remain unchanged except for parameter type adjustments if needed.)
-*/
-// --- Topological Reevaluation using Kahn's algorithm ---
-// This function gathers all cells transitively affected by modified_cell (using its children links),
-// computes in-degrees on the restricted subgraph, and then re-evaluates formulas in topological order.
-// void reevaluate_topologically(Spreadsheet* sheet, Cell* modified_cell) {
-//     int max_cells = sheet->rows * sheet->cols;
-//     // allocate a boolean array (indexed by linear index) to mark affected cells.
-//     bool* affectedMark = calloc(max_cells, sizeof(bool));
-//     // Temporary array to hold pointers to all affected cells.
-//     Cell** affected = malloc(max_cells * sizeof(Cell*));
-//     int affectedCount = 0;
+// Recursively collects all keys from an AVL tree in-order into a dynamic array.
+// keys: pointer to an int* (array of keys)
+// count: current count of keys
+// capacity: current capacity of the array
+// Helper: recursively collects keys from an AVL tree.
+static void avl_collect_keys(AVLTree root, int **keys, int *count, int *capacity) {
+    if (!root)
+        return;
+    avl_collect_keys(root->left, keys, count, capacity);
+    if (*count >= *capacity) {
+        *capacity *= 2;
+        *keys = realloc(*keys, (*capacity) * sizeof(int));
+    }
+    (*keys)[(*count)++] = root->key;
+    avl_collect_keys(root->right, keys, count, capacity);
+}
 
-//     // Use a DFS (stack) to collect all cells in the affected subgraph.
-//     Cell** stack = malloc(max_cells * sizeof(Cell*));
-//     int stackTop = 0;
-//     stack[stackTop++] = modified_cell;
-//     while (stackTop > 0) {
-//         Cell* current = stack[--stackTop];
-//         int idx = cell_index(sheet, current->row, current->col);
-//         if (!affectedMark[idx]) {
-//             affectedMark[idx] = true;
-//             affected[affectedCount++] = current;
-//             // For each child of this cell, add to DFS stack.
-//             for (int i = 0; i < current->child_count; i++) {
-//                 Cell* child = current->children[i];
-//                 stack[stackTop++] = child;
-//             }
-//         }
-//     }
-//     free(stack);
+// Revised reevaluate_topologically using in-degree (Kahn’s algorithm) and encoded keys.
+// Prototype: void reevaluate_topologically(Spreadsheet* sheet, short modRow, short modCol)
+void reevaluate_topologically(Spreadsheet* sheet, short modRow, short modCol, double* sleep_time) {
+    int total_cells = sheet->rows * sheet->cols;
+    // Allocate a visited array (one bool per cell) indexed by key.
+    bool *visited = calloc(total_cells, sizeof(bool));
+    if (!visited) {
+        fprintf(stderr, "Failed to allocate visited array\n");
+        return;
+    }
+    
+    // Use a DFS stack (storing int keys) to collect affected cells.
+    int *stack = malloc(total_cells * sizeof(int));
+    if (!stack) { free(visited); return; }
+    int stackTop = 0;
+    int modKey = modRow * sheet->cols + modCol;
+    stack[stackTop++] = modKey;
+    
+    // Array to hold affected cell keys.
+    int *affected = malloc(total_cells * sizeof(int));
+    if (!affected) { free(stack); free(visited); return; }
+    int affectedCount = 0;
+    
+    while (stackTop > 0) {
+        int curKey = stack[--stackTop];
+        if (!visited[curKey]) {
+            visited[curKey] = true;
+            affected[affectedCount++] = curKey;
+            short curRow = curKey / sheet->cols;
+            short curCol = curKey % sheet->cols;
+            Cell* curCell = get_cell(sheet, curRow, curCol);
+            // Traverse children stored in AVL tree.
+            int *childKeys = malloc(8 * sizeof(int));
+            if (!childKeys) continue;
+            int childCount = 0, childCapacity = 8;
+            avl_collect_keys(curCell->children, &childKeys, &childCount, &childCapacity);
+            for (int i = 0; i < childCount; i++) {
+                int childKey = childKeys[i];
+                if(!visited[childKey])
+                    stack[stackTop++] = childKey;
+            }
+            free(childKeys);
+        }
+    }
+    free(stack);
+    
+    // Build lookup: map each key to its index in the affected array.
+    int *lookup = malloc(total_cells * sizeof(int));
+    for (int i = 0; i < total_cells; i++)
+        lookup[i] = -1;
+    for (int i = 0; i < affectedCount; i++) {
+        lookup[affected[i]] = i;
+    }
+    
+    // Compute in-degree for affected cells.
+    int *inDegree = calloc(affectedCount, sizeof(int));
+    // For each affected cell, we scan its dependency info stored in, say, cell->cell1 and cell->cell2.
+    // (This part must match your dependency storage. Here we assume that if cell->formula is an arithmetic
+    // operation (codes 1-4), then cell->cell1 and cell->cell2 hold the encoded keys of its dependencies.)
+    for (int i = 0; i < affectedCount; i++) {
+        int key = affected[i];
+        short r = key / sheet->cols;
+        short c = key % sheet->cols;
+        Cell* cell = get_cell(sheet, r, c);
+        // For demonstration, assume arithmetic formulas use cell->cell1 and cell->cell2:
+        short rem = cell->formula%10;
+        if (rem==0) {
+            if(lookup[cell->cell1] != -1)
+                inDegree[i]++;
+            if(lookup[cell->cell2] != -1)
+                inDegree[i]++;
+        }
+        else if(rem==2){
+            if(lookup[cell->cell1] != -1)
+                inDegree[i]++;
+        }
+        else if(rem==3){
+            if(lookup[cell->cell2] != -1)
+                inDegree[i]++;
+        }
+        // For range formulas (codes 5-9), iterate over the range:
+        else if (cell->formula >= 5 && cell->formula <= 9) {
+            short startRow = cell->cell1 / sheet->cols;
+            short startCol = cell->cell1 % sheet->cols;
+            short endRow   = cell->cell2 / sheet->cols;
+            short endCol   = cell->cell2 % sheet->cols;
+            for (short rr = startRow; rr <= endRow; rr++) {
+                for (short cc = startCol; cc <= endCol; cc++) {
+                    int parentKey = (int)(rr * sheet->cols + cc);
+                    if (lookup[parentKey] != -1)
+                        inDegree[i]++;
+                }
+            }
+        }
+        // Else, inDegree stays 0.
+    }
+    
+    // Prepare queue for Kahn's algorithm.
+    int *queue = malloc(affectedCount * sizeof(int));
+    int qFront = 0, qRear = 0;
+    for (int i = 0; i < affectedCount; i++) {
+        if (inDegree[i] == 0)
+            queue[qRear++] = affected[i];
+    }
+    
+    // Process cells in topological order.
+    while (qFront < qRear) {
+        int curKey = queue[qFront++];
+        short r = curKey / sheet->cols;
+        short c = curKey % sheet->cols;
+        Cell* curCell = get_cell(sheet, r, c);
+        reevaluate_formula(sheet, curCell, sleep_time);
+        // For each affected cell, if it depends on curKey, decrement its in-degree.
+        for (int i = 0; i < affectedCount; i++) {
+            int key = affected[i];
+            Cell* cell = get_cell(sheet, key / sheet->cols, key % sheet->cols);
+            bool depends = false;
+            short rem = cell->formula%10;
+            if(rem==0){
+                if (cell->cell1 == curKey || cell->cell2 == curKey)
+                    depends = true;
+            }
+            else if(rem==2){
+                if (cell->cell1 == curKey)
+                    depends = true;
+            }
+            else if(rem==3){
+                if (cell->cell2 == curKey)
+                    depends = true;
+            }
+            else if (cell->formula >= 5 && cell->formula <= 9) {
+                short startRow = cell->cell1 / sheet->cols;
+                short startCol = cell->cell1 % sheet->cols;
+                short endRow   = cell->cell2 / sheet->cols;
+                short endCol   = cell->cell2 % sheet->cols;
+                if (r >= startRow && r <= endRow &&
+                    c >= startCol && c <= endCol)
+                {
+                    depends = true;
+                }
+            }
+            if (depends) {
+                inDegree[i]--;
+                if (inDegree[i] == 0)
+                    queue[qRear++] = affected[i];
+            }
+        }
+    }
+    
+    free(queue);
+    free(inDegree);
+    free(lookup);
+    free(affected);
+    free(visited);
+}
 
-//     // Create a lookup table: use an array of indices (size max_cells, default -1)
-//     int* lookup = malloc(max_cells * sizeof(int));
-//     for (int i = 0; i < max_cells; i++) {
-//         lookup[i] = -1;
-//     }
-//     for (int i = 0; i < affectedCount; i++) {
-//         int idx = cell_index(sheet, affected[i]->row, affected[i]->col);
-//         lookup[idx] = i;
-//     }
+// Helper: DFS to check whether, starting from target (tRow, tCol),
+// we can reach any cell within the range [rStart, cStart] to [rEnd, cEnd].
+// Returns true if a cycle would be created.
+bool detect_cycle_range(Spreadsheet* sheet, short rStart, short cStart, short rEnd, short cEnd, short tRow, short tCol) {
+    int total = sheet->rows * sheet->cols;
+    bool *visited = calloc(total, sizeof(bool));
+    if (!visited) {
+        fprintf(stderr, "detect_cycle_range: allocation failed\n");
+        return false; // Fallback: assume no cycle.
+    }
+    int *stack = malloc(total * sizeof(int));
+    if (!stack) { free(visited); return false; }
+    int stackTop = 0;
+    int targetKey = encode_cell_key(tRow, tCol, sheet->cols);
+    stack[stackTop++] = targetKey;
+    bool cycle = false;
 
-//     // Compute in-degree (within the affected subgraph) for each affected cell.
-//     // (We count only those parent links that lie in the affected set.)
-//     int* inDegree = calloc(affectedCount, sizeof(int));
-//     for (int i = 0; i < affectedCount; i++) {
-//         Cell* cell = affected[i];
-//         int deg = 0;
-//         for (int j = 0; j < cell->parents_count; j++) {
-//             Cell* parent = cell->parents[j];
-//             int pidx = cell_index(sheet, parent->row, parent->col);
-//             if (affectedMark[pidx]) { // parent is in affected subgraph
-//                 deg++;
-//             }
-//         }
-//         inDegree[i] = deg;
-//     }
+    while (stackTop > 0) {
+        int curKey = stack[--stackTop];
+        if (!visited[curKey]) {
+            visited[curKey] = true;
+            short curRow = curKey / sheet->cols;
+            short curCol = curKey % sheet->cols;
+            // If current cell is within the parent's range, cycle detected.
+            if (curRow >= rStart && curRow <= rEnd && curCol >= cStart && curCol <= cEnd) {
+                cycle = true;
+                break;
+            }
+            Cell* curCell = get_cell(sheet, curRow, curCol);
+            // Collect child keys from the AVL tree.
+            int capacity = 8, count = 0;
+            int *childKeys = malloc(capacity * sizeof(int));
+            if (childKeys) {
+                avl_collect_keys(curCell->children, &childKeys, &count, &capacity);
+                for (int i = 0; i < count; i++) {
+                    int childKey = childKeys[i];
+                    if (!visited[childKey])
+                        stack[stackTop++] = childKey;
+                }
+                free(childKeys);
+            }
+        }
+    }
+    free(stack);
+    free(visited);
+    return cycle;
+}
 
-//     // Prepare a queue (using an array of affected cell indices) for those with inDegree == 0.
-//     int* queue = malloc(affectedCount * sizeof(int));
-//     int qFront = 0, qRear = 0;
-//     for (int i = 0; i < affectedCount; i++) {
-//         if (inDegree[i] == 0)
-//             queue[qRear++] = i;
-//     }
+// --- Cycle Detection Function ---
+// Returns true if there is a path from the cell identified by (srcRow, srcCol)
+// to the cell identified by (targetRow, targetCol) in the current dependency graph.
+bool detect_cycle(Spreadsheet* sheet, short srcRow, short srcCol, short targetRow, short targetCol) {
+    int total = sheet->rows * sheet->cols;
+    bool *visited = calloc(total, sizeof(bool));
+    if (!visited)
+        return false;  // Fallback: assume no cycle if allocation fails.
 
-//     // Process the queue in topological order.
-//     // For each cell, re-calculate its formula (if it has one) and then update
-//     // the in-degree of its children.
-//     double dummySleep = 0.0;
-//     while (qFront < qRear) {
-//         int curIndex = queue[qFront++];
-//         Cell* curCell = affected[curIndex];
-//         // If the cell has a formula, re-evaluate it.
-//         if (curCell->formula) {
-//             // Call your evaluate_formula() function or equivalent evaluation routine.
-//             // It should update curCell->value and set error if needed.
-//             CommandStatus stat = evaluate_formula(sheet, curCell, curCell->formula, &dummySleep);
-//             // (You may decide to propagate errors here if you want.)
-//             (void)stat;   // Ignored in this snippet.
-//         }
-//         // For every child in curCell->children that is within the affected subgraph,
-//         // decrement its in-degree.
-//         for (int i = 0; i < curCell->child_count; i++) {
-//             Cell* child = curCell->children[i];
-//             int childIdx = cell_index(sheet, child->row, child->col);
-//             if (affectedMark[childIdx]) {
-//                 int lookupIndex = lookup[childIdx];
-//                 if (lookupIndex != -1) {
-//                     inDegree[lookupIndex]--;
-//                     if (inDegree[lookupIndex] == 0) {
-//                         queue[qRear++] = lookupIndex;
-//                     }
-//                 }
-//             }
-//         }
-//     }
-//     free(queue);
-//     free(inDegree);
-//     free(lookup);
-//     free(affected);
-//     free(affectedMark);
-// }
+    int srcKey = encode_cell_key(srcRow, srcCol, sheet->cols);
+    int targetKey = encode_cell_key(targetRow, targetCol, sheet->cols);
+
+    int *stack = malloc(total * sizeof(int));
+    int stackTop = 0;
+    stack[stackTop++] = srcKey;
+    bool cycle = false;
+
+    while (stackTop > 0) {
+        int curKey = stack[--stackTop];
+        if (curKey == targetKey) {
+            cycle = true;
+            break;
+        }
+        if (!visited[curKey]) {
+            visited[curKey] = true;
+            short curRow = curKey / sheet->cols;
+            short curCol = curKey % sheet->cols;
+            Cell* curCell = get_cell(sheet, curRow, curCol);
+            // Collect child keys from the AVL tree of children.
+            int capacity = 8, count = 0;
+            int *childKeys = malloc(capacity * sizeof(int));
+            if (childKeys) {
+                avl_collect_keys(curCell->children, &childKeys, &count, &capacity);
+                for (int i = 0; i < count; i++) {
+                    int childKey = childKeys[i];
+                    if (!visited[childKey])
+                        stack[stackTop++] = childKey;
+                }
+                free(childKeys);
+            }
+        }
+    }
+    free(stack);
+    free(visited);
+    return cycle;
+}
 
 // get_column_name 
 char* get_column_name(int col) {
@@ -307,11 +486,7 @@ CommandStatus parse_range(const char* range_str, Range* range) {
     return CMD_OK;
 }
 
-Cell* get_cell_check(Spreadsheet* sheet, int index){
-    return &(sheet->grid[index]);
-}
-
-void sum_value(Spreadsheet* sheet, Cell *cell){
+CommandStatus sum_value(Spreadsheet* sheet, Cell *cell){
         int sum = 0;
         short row1, col1, row2, col2;
         get_row_col(cell->cell1, &row1, &col1, sheet->cols);
@@ -326,9 +501,11 @@ void sum_value(Spreadsheet* sheet, Cell *cell){
                 sum += ref_cell->value;
             }
         }
+        cell->value = sum;
+        return CMD_OK;
 }
 
-void variance(Spreadsheet* sheet, Cell *cell){
+CommandStatus variance(Spreadsheet* sheet, Cell *cell){
     double variance = 0.0;
     int count = 0;
     short row1, col1, row2, col2;
@@ -349,9 +526,10 @@ void variance(Spreadsheet* sheet, Cell *cell){
     }
     variance /= count;
     cell->value = (int)round(sqrt(variance));
+    return CMD_OK;
 }
 
-void min_max(Spreadsheet* sheet, Cell* cell, bool is_min){
+CommandStatus min_max(Spreadsheet* sheet, Cell* cell, bool is_min){
     int max = INT_MIN;
     int min = INT_MAX; 
     short row1, col1, row2, col2;
@@ -359,7 +537,7 @@ void min_max(Spreadsheet* sheet, Cell* cell, bool is_min){
     get_row_col(cell->cell2, &row2, &col2, sheet->cols);
     for(int i=row1; i<=row2; i++){
         for(int j=col1; j<=col2; j++){
-            Cell* ref_cell = get_cell_check(sheet, i*sheet->cols+j);
+            Cell* ref_cell = get_cell(sheet, i, j);
             if(ref_cell->error_state){
                 cell->error_state = 1;
                 return CMD_OK;
@@ -373,147 +551,173 @@ void min_max(Spreadsheet* sheet, Cell* cell, bool is_min){
         }
     }
     cell->value = is_min ? min : max;
+    return CMD_OK;
+}
+
+CommandStatus sleep_prog(Spreadsheet* sheet, Cell *current,double* sleep_time){
+    Cell* ref_cell = get_cell_check(sheet, current->cell1);
+    current->value = ref_cell->value;
+    if (ref_cell->error_state){
+        current->error_state = true;
+        return CMD_OK;
+    }
+    if(ref_cell->value < 0){
+        return CMD_OK;
+    }
+
+    *sleep_time = +current->value;
+    return CMD_OK;
+}
+
+CommandStatus handle_sleep(Spreadsheet* sheet, short row, short col, const char* expr, double* sleep_time) {
+    size_t len = strlen(expr);
+    if (len < 7)
+        return CMD_UNRECOGNIZED;  // Must be at least "SLEEP(x)" (7 characters)
+
+    // Allocate buffer for inner argument (between "SLEEP(" and the final ')')
+    char* sleep_arg = malloc(len - 6);  // (len-6) bytes, including space for null terminator
+    if (!sleep_arg)
+        return CMD_UNRECOGNIZED;
+    strncpy(sleep_arg, expr + 6, len - 7);
+    sleep_arg[len - 7] = '\0';
+
+    int value = 0;
+    Cell* current = get_cell(sheet, row, col);
+
+    // If the argument begins with an alphabetic character, treat it as a cell reference.
+    if (isalpha((unsigned char)sleep_arg[0])) {
+        short ref_row, ref_col;
+        parse_cell_reference(sleep_arg, &ref_row, &ref_col);
+        free(sleep_arg);
+        if (ref_row < 0 || ref_row >= sheet->rows || ref_col < 0 || ref_col >= sheet->cols)
+            return CMD_INVALID_CELL;
+        // *** CYCLE DETECTION ***
+        if (detect_cycle(sheet, ref_row, ref_col, row, col)) {
+            return CMD_CIRCULAR_REF;
+        }
+        // Remove any existing dependency links.
+        remove_all_parents(sheet, row, col);
+        Cell* ref_cell = get_cell(sheet, ref_row, ref_col);
+        // Establish dependency: add current cell as a child of the referenced cell.
+        add_child(ref_cell, row, col, sheet->cols);
+        // Update current cell's cell1 field to store the reference.
+        current->cell1 = encode_cell_key(ref_row, ref_col, sheet->cols);
+        value = ref_cell->value;
+        // Use opcode 102 for SLEEP with cell reference.
+        current->formula = 102;
+    } else {
+        // Otherwise, try to parse a numeric argument.
+        char* endptr;
+        long num = strtol(sleep_arg, &endptr, 10);
+        // Strict validation: if any non-numeric character remains, error out.
+        if (*endptr != '\0') {
+            free(sleep_arg);
+            return CMD_UNRECOGNIZED;
+        }
+        // Remove any existing dependency links.
+        remove_all_parents(sheet, row, col);
+        value = (int)num;
+        free(sleep_arg);
+        current->formula = -1;
+    }
+    current->value = value;
+    sleep_prog(sheet, current, sleep_time);
+    return CMD_OK;
 }
 
 /* ---------- (Stub) Reevaluate Formula ---------- */
 CommandStatus reevaluate_formula(Spreadsheet* sheet, Cell* cell, double* sleep_time) {
     short msb = cell->formula/10;
-    if (cell->formula==-1) return CMD_OK;
-    // ADD
-    else if(msb==1){
-        msb = cell->formula%10;
-        if(msb==0){
-            Cell* ref_cell1 = get_cell_check(sheet, cell->cell1);
-            Cell* ref_cell2 = get_cell_check(sheet, cell->cell2);
-            if(ref_cell1->error_state || ref_cell2->error_state){
-                cell->error_state = 1;
-                return CMD_OK;
-            }
+    short rem = cell->formula%10;
+    CommandStatus status = CMD_OK;
+    if (cell->formula==-1) 
+        return status;   
+    // Both are cell references
+    if (rem==0){
+        Cell* ref_cell1 = get_cell_check(sheet, cell->cell1);
+        Cell* ref_cell2 = get_cell_check(sheet, cell->cell2);
+        if(ref_cell1->error_state || ref_cell2->error_state){
+            cell->error_state = 1;
+            return CMD_OK;
+        }
+        if(msb==1){
             cell->value = ref_cell1->value + ref_cell2->value;
         }
         else if(msb==2){
-            Cell* ref_cell1 = get_cell_check(sheet, cell->cell1);
-            if(ref_cell1->error_state){
-                cell->error_state = 1;
-                return CMD_OK;
-            }
-            cell->value = ref_cell1->value + cell->cell2;
-        }
-        else {
-            Cell *ref_cell2 = get_cell_check(sheet, cell->cell2);
-            if(ref_cell2->error_state){
-                cell->error_state = 1;
-                return CMD_OK;
-            }
-            cell->value = cell->cell1 + ref_cell2->value;
-        }
-    }
-    // SUB
-    else if(msb==2){
-        msb = cell->formula%10;
-        if(msb==0){
-            Cell* ref_cell1 = get_cell_check(sheet, cell->cell1);
-            Cell* ref_cell2 = get_cell_check(sheet, cell->cell2);
-            if(ref_cell1->error_state || ref_cell2->error_state){
-                cell->error_state = 1;
-                return CMD_OK;
-            }
             cell->value = ref_cell1->value - ref_cell2->value;
         }
-        else if(msb==2){
-            Cell* ref_cell1 = get_cell_check(sheet, cell->cell1);
-            if(ref_cell1->error_state){
-                cell->error_state = 1;
-                return CMD_OK;
-            }
-            cell->value = ref_cell1->value - cell->cell2;
-        }
-        else {
-            Cell *ref_cell2 = get_cell_check(sheet, cell->cell2);
-            if(ref_cell2->error_state){
-                cell->error_state = 1;
-                return CMD_OK;
-            }
-            cell->value = cell->cell1 - ref_cell2->value;
-        }
-    }
-    // Div
-    else if(msb==3){
-        msb = cell->formula%10;
-        if(msb==0){
-            Cell* ref_cell1 = get_cell_check(sheet, cell->cell1);
-            Cell* ref_cell2 = get_cell_check(sheet, cell->cell2);
-            if(ref_cell1->error_state || ref_cell2->error_state){
-                cell->error_state = 1;
-                return CMD_OK;
-            }
+        else if(msb==3){
             if(ref_cell2->value==0){
                 cell->error_state = 1;
                 return CMD_OK;
             }
             cell->value = ref_cell1->value / ref_cell2->value;
         }
+        else if(msb==4){
+            cell->value = ref_cell1->value * ref_cell2->value;
+        }
+    }
+    // Single cell and custom value
+    else if (rem==2){
+        Cell* ref_cell1 = get_cell_check(sheet, cell->cell1);
+        if(ref_cell1->error_state){
+            cell->error_state = 1;
+            return CMD_OK;
+        }
+        if(msb==1){
+            cell->value = ref_cell1->value + cell->cell2;
+        }
         else if(msb==2){
-            Cell* ref_cell1 = get_cell_check(sheet, cell->cell1);
-            if(ref_cell1->error_state){
-                cell->error_state = 1;
-                return CMD_OK;
-            }
+            cell->value = ref_cell1->value - cell->cell2;
+        }
+        else if(msb==3){
             if(cell->cell2==0){
                 cell->error_state = 1;
                 return CMD_OK;
             }
             cell->value = ref_cell1->value / cell->cell2;
         }
-        else {
-            Cell *ref_cell2 = get_cell_check(sheet, cell->cell2);
-            if(ref_cell2->error_state){
-                cell->error_state = 1;
-                return CMD_OK;
-            }
+        else if(msb==4){
+            cell->value = ref_cell1->value * cell->cell2;
+        }
+        else if (msb==8){
+            cell->value = ref_cell1->value;
+        }
+        else{
+            status=sleep_prog(sheet, cell, sleep_time);
+        }
+    }
+    // Custom value and single cell
+    else if (rem==3){
+        Cell* ref_cell2 = get_cell_check(sheet, cell->cell2);
+        if(ref_cell2->error_state){
+            cell->error_state = 1;
+            return CMD_OK;
+        }
+        if(msb==1){
+            cell->value = cell->cell1 + ref_cell2->value;
+        }
+        else if(msb==2){
+            cell->value = cell->cell1 - ref_cell2->value;
+        }
+        else if(msb==3){
             if(ref_cell2->value==0){
                 cell->error_state = 1;
                 return CMD_OK;
             }
             cell->value = cell->cell1 / ref_cell2->value;
         }
-    }
-    // MULt
-    else if(msb==4){
-        msb = cell->formula%10;
-        if(msb==0){
-            Cell* ref_cell1 = get_cell_check(sheet, cell->cell1);
-            Cell* ref_cell2 = get_cell_check(sheet, cell->cell2);
-            if(ref_cell1->error_state || ref_cell2->error_state){
-                cell->error_state = 1;
-                return CMD_OK;
-            }
-            cell->value = ref_cell1->value * ref_cell2->value;
-        }
-        else if(msb==2){
-            Cell* ref_cell1 = get_cell_check(sheet, cell->cell1);
-            if(ref_cell1->error_state){
-                cell->error_state = 1;
-                return CMD_OK;
-            }
-            cell->value = ref_cell1->value * cell->cell2;
-        }
-        else {
-            Cell *ref_cell2 = get_cell_check(sheet, cell->cell2);
-            if(ref_cell2->error_state){
-                cell->error_state = 1;
-                return CMD_OK;
-            }
+        else if(msb==4){
             cell->value = cell->cell1 * ref_cell2->value;
         }
-    }
+    } 
     // SUM
-    else if(msb==5){
-        sum_value(sheet, cell);
+    else if(rem==5){
+        status = sum_value(sheet, cell);
     }
     // AVG
-    else if(msb==6){
-        sum_value(sheet, cell);
+    else if(rem==6){
+        status = sum_value(sheet, cell);
         int count = 0;
         short row1, col1, row2, col2;
         get_row_col(cell->cell1, &row1, &col1, sheet->cols);
@@ -522,172 +726,113 @@ CommandStatus reevaluate_formula(Spreadsheet* sheet, Cell* cell, double* sleep_t
         cell->value = cell->value /count;
     }
     // MIN
-    else if(msb==7){
-        min_max(sheet, cell, true);
+    else if(rem==7){
+        status = min_max(sheet, cell, true);
     }
     // MAX
-    else if(msb==8){
-        min_max(sheet, cell, false);
+    else if(rem==8){
+        status = min_max(sheet, cell, false);
     }
     // STDEV
-    else if(msb==9){
-        variance(sheet, cell);
+    else if(rem==9){
+        status = variance(sheet, cell);
     }
-
-    // Sleep yet to be implemented
-    return CMD_OK;
+    return status;
 }
 
-/* ---------- (Stub) Evaluate Formula ---------- */
+// Updated evaluate_formula:
+// The parameters: sheet, pointer to the current cell, its position (row, col), 
+// the expression string, and a sleep_time pointer.
+// We assume that if a cell has no formula, cell->formula is -1.
 CommandStatus evaluate_formula(Spreadsheet* sheet, Cell* cell, short row, short col, const char* expr, double* sleep_time) {
-
     int expr_len = strlen(expr);
     if(expr_len == 0) {
         return CMD_UNRECOGNIZED;
     }
 
-    /* --- Check for range-based functions: SUM, AVG, MIN, MAX, STDEV --- */
+    // === Range-based functions: SUM, AVG, MIN, MAX, STDEV ===
     if (strncmp(expr, "SUM(", 4) == 0 || strncmp(expr, "AVG(", 4) == 0 ||
         strncmp(expr, "MIN(", 4) == 0 || strncmp(expr, "MAX(", 4) == 0 ||
         strncmp(expr, "STDEV(", 6) == 0) {
         
-        bool is_sum = (strncmp(expr, "SUM(", 4) == 0);
         bool is_avg = (strncmp(expr, "AVG(", 4) == 0);
         bool is_min = (strncmp(expr, "MIN(", 4) == 0);
         bool is_max = (strncmp(expr, "MAX(", 4) == 0);
         bool is_stdev = (strncmp(expr, "STDEV(", 6) == 0);
         int prefix_len = is_stdev ? 6 : 4;
 
-        // Check trailing parenthesis.
-        if (expr[expr_len - 1] != ')') {
+        if(expr[expr_len - 1] != ')')
             return CMD_UNRECOGNIZED;
-        }
-        // Extract the range string (inside the function call).
+
         char* range_str = strndup(expr + prefix_len, expr_len - prefix_len - 1);
-        if (!range_str) {
+        if (!range_str)
             return CMD_UNRECOGNIZED;
-        }
         Range range;
         CommandStatus rstatus = parse_range(range_str, &range);
         free(range_str);
-        if (rstatus != CMD_OK) {
-            cell->error_state = 1;
+        if(rstatus != CMD_OK)
             return rstatus;
-        }
-        // Range must be valid (start must be less than or equal to end).
-        if (range.start_row > range.end_row || range.start_col > range.end_col) {
-            return CMD_INVALID_RANGE;
-        }
 
-        // Clear old dependencies.
+        // *** CYCLE CHECK for range dependencies ***
+        // Check whether a cycle would be created if we add dependencies from every cell in the range.
+        // If detect_cycle_range() returns true, then at least one cell in the range is already an ancestor of the target.
+        if (detect_cycle_range(sheet, range.start_row, range.start_col, range.end_row, range.end_col, row, col))
+            return CMD_CIRCULAR_REF;
+
+        // Remove old dependencies (if any)
         remove_all_parents(sheet, row, col);
-        // Add in parent the children only 
-        for(int r=range.start_row; r<=range.end_row; r++){
-            for(int c=range.start_col; c<=range.end_col; c++){
-                Cell* ref_cell = get_cell_check(sheet, r*sheet->cols+c);
-                ref_cell->children = avl_insert(ref_cell->children, encode_cell_key(row, col, sheet->cols));
+
+        // For each cell in the range, add the current cell as a dependent.
+        int cell_key = encode_cell_key(row, col, sheet->cols);
+        for (short r = range.start_row; r <= range.end_row; r++) {
+            for (short c = range.start_col; c <= range.end_col; c++) {
+                Cell* ref_cell = get_cell(sheet, r, c);
+                ref_cell->children = avl_insert(ref_cell->children, cell_key);
             }
         }
+        // Save the range info in the cell dependency fields.
+        cell->cell1 = encode_cell_key(range.start_row, range.start_col, sheet->cols);
+        cell->cell2 = encode_cell_key(range.end_row, range.end_col, sheet->cols);
 
-        // Store the range as cell1 and cell2
-        cell->cell1=encode_cell_key(range.start_row, range.start_col, sheet->cols);
-        cell->cell2=encode_cell_key(range.end_row, range.end_col, sheet->cols);
-        // Set the formula code
-        if(is_stdev){
+        // Set the formula code and perform evaluation.
+        if (is_stdev) {
             cell->formula = 9;
             variance(sheet, cell);
-        }
-        else if(is_max){
+        } else if (is_max) {
             cell->formula = 8;
             min_max(sheet, cell, false);
-        }
-        else if(is_min){
+        } else if (is_min) {
             cell->formula = 7;
-            min_max(sheet, cell, false);
-        }
-        else if(is_avg){
+            min_max(sheet, cell, true);
+        } else if (is_avg) {
             cell->formula = 6;
             sum_value(sheet, cell);
-            cell->value = cell->value / ((range.end_row-range.start_row+1)*(range.end_col-range.start_col+1));
-        }
-        else{
+            int count = (range.end_row - range.start_row + 1) * (range.end_col - range.start_col + 1);
+            cell->value = cell->value / count;
+        } else { // SUM
             cell->formula = 5;
             sum_value(sheet, cell);
         }
-
         return CMD_OK;
     }
    
-    // Handle SLEEP function
+    // === SLEEP function (if implemented) ===
     else if (strncmp(expr, "SLEEP(", 6) == 0) {
-        // // Ensure the last character is ')'
-        // if (expr[expr_len - 1] != ')') {
-        //     return CMD_UNRECOGNIZED;
-        // }
-        // // Extract the inner argument between the parentheses.
-        // char* inner = strndup(expr + 6, expr_len - 7);
-        // if (!inner) {
-        //     cell->error_state = 1;
-        //     return CMD_UNRECOGNIZED;
-        // }
-        // // Check if the inner argument is a number.
-        // char* inner_endptr;
-        // long sleepArg = strtol(inner, &inner_endptr, 10);
-        // if (*inner_endptr == '\0') {
-        //     // The argument is a pure number.
-        //     if (sleepArg < 0) {
-        //         cell->value = (int)sleepArg; // update immediately without sleep
-        //     } else {
-        //         cell->value = (int)sleepArg;
-        //         *sleep_time = (double)sleepArg;
-        //     }
-        //     // Instead of storing "SLEEP(5)", store just "5".
-        //     free(cell->formula);
-        //     cell->formula = strdup(inner);
-        //     free(inner);
-        //     return CMD_OK;
-        // }
-        // // Otherwise, assume inner is a cell reference.
-        // int ref_row = 0, ref_col = 0;
-        // parse_cell_reference(inner, &ref_row, &ref_col);
-        // free(inner);
-        // if (ref_row < 0 || ref_row >= sheet->rows || ref_col < 0 || ref_col >= sheet->cols) {
-        //     cell->error_state = 1;
-        //     return CMD_INVALID_CELL;
-        // }
-        // Cell* ref_cell = sheet->grid[ref_row][ref_col];
-        // if (ref_cell->error_state) {
-        //     return CMD_RANGE_ERROR;
-        // }
-        // // Add dependency: register that the current cell depends on ref_cell.
-        // add_parent(cell, ref_cell);
-        // cell->value = ref_cell->value;
-        // // Instead of storing "SLEEP(B2)", store only "B2" as this cell's formula.
-        // free(cell->formula);
-        // // Here we re-create the cell reference string. We assume get_column_name converts a column number
-        // // to its letter representation (e.g. 0 -> "A", 1 -> "B", etc.). Adjust as needed.
-        // char col_name;
-        // get_column_name(ref_col, col_name, sizeof(col_name));
-        // char formula_str;
-        // snprintf(formula_str, sizeof(formula_str), "%s%d", col_name, ref_row + 1);
-        // cell->formula = strdup(formula_str);
-        // return CMD_OK;
-        // return handle_sleep(sheet, row, col, expr, sleep_time);
+        return handle_sleep(sheet, row, col, expr, sleep_time);
     }
 
-    // 2. Try to interpret the entire expression as an integer literal.
-    //    (e.g., "23" or "-17")
+    // === Pure integer literal ===
     char* endptr;
     long number = strtol(expr, &endptr, 10);
-    if(*endptr == '\0') { 
-        // The entire expression was a number.
+    if(*endptr == '\0') {
+        remove_all_parents(sheet, row, col);
         cell->value = (int)number;
         cell->formula = -1;
+        cell->error_state = false;
         return CMD_OK;
     }
 
-    // 3. Check whether the expression is a simple cell reference.
-    // If all characters are alphanumeric (letters and digits) then assume it’s a reference.
+    // === Simple cell reference (all alphanumeric) ===
     bool all_alnum = true;
     for (int i = 0; i < expr_len; i++) {
         if (!isalnum((unsigned char)expr[i])) {
@@ -695,26 +840,31 @@ CommandStatus evaluate_formula(Spreadsheet* sheet, Cell* cell, short row, short 
             break;
         }
     }
-    // If the expression is a simple cell reference.
-    if(all_alnum) {
+    if (all_alnum) {
         short ref_row, ref_col;
         parse_cell_reference(expr, &ref_row, &ref_col);
-        if(ref_row < 0 || ref_row >= sheet->rows || ref_col < 0 || ref_col >= sheet->cols) {
+        if(ref_row < 0 || ref_row >= sheet->rows || ref_col < 0 || ref_col >= sheet->cols)
             return CMD_INVALID_CELL;
+        // *** CYCLE DETECTION ***
+        if (detect_cycle(sheet, ref_row, ref_col, row, col)) {
+            return CMD_CIRCULAR_REF;
         }
+        remove_all_parents(sheet, row, col);
+        cell->formula = 82;  // Code for simple cell reference.
+        cell->error_state = false;
         Cell* ref_cell = get_cell(sheet, ref_row, ref_col);
-        cell->cell1=encode_cell_key(ref_row, ref_col, sheet->cols);
-        if(ref_cell->error_state) {
-            cell->error_state = 1;
-        }
-        cell->formula = 80;
-        cell->value = ref_cell->value;
+        // Add current cell as dependent of ref_cell.
+        add_child(ref_cell, row, col, sheet->cols);
+        cell->cell1 = encode_cell_key(ref_row, ref_col, sheet->cols);
+        if(ref_cell->error_state)
+            cell->error_state = true;
+        else
+            cell->value = ref_cell->value;
         return CMD_OK;
     }
 
-    // 4. At this point, the expression should be a binary arithmetic expression.
-    // We now search for a binary operator. Note that we start scanning at index 1
-    // so as not to confuse a leading minus sign with a subtraction operator.
+    // === Binary arithmetic expression ===
+    // Find operator starting at index 1 to avoid confusion with a leading minus sign.
     int op_index = -1;
     char op_char = '\0';
     for (int i = 1; i < expr_len; i++) {
@@ -725,102 +875,145 @@ CommandStatus evaluate_formula(Spreadsheet* sheet, Cell* cell, short row, short 
             break;
         }
     }
-    if(op_index == -1) {
-        // No operator found but earlier tests failed – unrecognized expression.
+    if(op_index == -1)
         return CMD_UNRECOGNIZED;
-    }
 
-    // 5. Split the expression into left and right operand strings.
-    //    For example, "B1+3" is split into "B1" and "3".
-    char* left_str = strndup(expr, op_index);              // left substring: first op_index characters.
-    char* right_str = strdup(expr + op_index + 1);           // right substring: after the operator.
+    // Split into left and right operands.
+    char* left_str = strndup(expr, op_index);
+    char* right_str = strdup(expr + op_index + 1);
     if (!left_str || !right_str) {
         free(left_str);
         free(right_str);
         return CMD_UNRECOGNIZED;
     }
-
     int left_val = 0, right_val = 0;
-
-    // 6. Evaluate the left operand.
-    // First, try converting to an integer using strtol. Note that if conversion
-    // stops early, we assume the operand is a cell reference.
+    bool left_is_cell = false, right_is_cell = false;
     bool error_found = false;
+    short left_row = -1, left_col = -1, right_row = -1, right_col = -1;
+
+    // Evaluate left operand.
     char* left_endptr;
     long left_num = strtol(left_str, &left_endptr, 10);
-    if(*left_endptr == '\0') {
+    int ref_cell_left = -1;
+    if (*left_endptr == '\0') {
         left_val = (int)left_num;
     } else {
-        // Not a pure number; assume it is a cell reference.
-        short ref_row, ref_col;
-        parse_cell_reference(left_str, &ref_row, &ref_col);
-        if(ref_row < 0 || ref_row >= sheet->rows || ref_col < 0 || ref_col >= sheet->cols) {
+        parse_cell_reference(left_str, &left_row, &left_col);
+        if(left_row < 0 || left_row >= sheet->rows || left_col < 0 || left_col >= sheet->cols) {
             free(left_str); free(right_str);
             return CMD_INVALID_CELL;
         }
-        Cell* ref_cell = get_cell(sheet, ref_row, ref_col);
-        if(ref_cell->error_state) {
-            free(left_str); free(right_str);
+        left_is_cell = true;
+        Cell* ref_cell = get_cell(sheet, left_row, left_col);
+        if(ref_cell->error_state)
             error_found = true;
-            cell->error_state = true;
-            // return CMD_RANGE_ERROR;
-        }
-        // Add a dependency: cell now depends on ref_cell.
-        cell->cell1 = encode_cell_key(ref_row, ref_col, sheet->cols);
+        ref_cell_left = encode_cell_key(left_row, left_col, sheet->cols);
         left_val = ref_cell->value;
     }
 
-    // 7. Evaluate the right operand.
+    // Evaluate right operand.
+    int ref_cell_right = -1;
     char* right_endptr;
     long right_num = strtol(right_str, &right_endptr, 10);
-    if(*right_endptr == '\0') {
+    if (*right_endptr == '\0') {
         right_val = (int)right_num;
     } else {
-        // Assume it is a cell reference.
-        short ref_row, ref_col;
-        parse_cell_reference(right_str, &ref_row, &ref_col);
-        if(ref_row < 0 || ref_row >= sheet->rows || ref_col < 0 || ref_col >= sheet->cols) {
+        parse_cell_reference(right_str, &right_row, &right_col);
+        if(right_row < 0 || right_row >= sheet->rows || right_col < 0 || right_col >= sheet->cols) {
             free(left_str); free(right_str);
             return CMD_INVALID_CELL;
         }
-        Cell* ref_cell = get_cell(sheet, ref_row, ref_col);
-        if(ref_cell->error_state) {
-            free(left_str); free(right_str);
+        right_is_cell = true;
+        Cell* ref_cell = get_cell(sheet, right_row, right_col);
+        if(ref_cell->error_state)
             error_found = true;
-            cell->error_state = true;
-        }
-        cell->cell2 = encode_cell_key(ref_row, ref_col, sheet->cols);
+        ref_cell_right = encode_cell_key(right_row, right_col, sheet->cols);
         right_val = ref_cell->value;
     }
 
-    // Clean up temporary strings.
     free(left_str);
     free(right_str);
-    // If an error was found, in any cell reference then cell is in error state.
-    if(error_found) {
-        return CMD_OK;
+    // *** CYCLE DETECTION ***
+    if (left_is_cell && detect_cycle(sheet, left_row, left_col, row, col)) {
+        return CMD_CIRCULAR_REF;
     }
-    // 8. Perform the binary operation indicated by op_char.
+    if (right_is_cell && detect_cycle(sheet, right_row, right_col, row, col)) {
+        return CMD_CIRCULAR_REF;
+    }
+
+    // Remove old dependencies (only now; we did not update parent's for arithmetic operands before).
+    remove_all_parents(sheet, row, col);
+    // (For each operand that is a cell, add current cell as dependent of that operand.)
+    if (left_is_cell) {
+        cell->cell1 = ref_cell_left;                  // Save the left ref cell key as left operand.
+        Cell* ref_cell = get_cell_check(sheet, ref_cell_left); 
+        add_child(ref_cell, row, col, sheet->cols);  // Add current cell as child of ref_cell.
+    }
+    else
+        cell->cell1 = left_val;                      // Save the value as the left operand.
+
+    if (right_is_cell) {
+        cell->cell2 = ref_cell_right;                // Save the right ref cell key as right operand.
+        Cell* ref_cell = get_cell_check(sheet, ref_cell_right);
+        add_child(ref_cell, row, col, sheet->cols);  // Add current cell as child of ref_cell.
+    }
+    else
+        cell->cell2 = right_val;                     // Save the value as the right operand.
+
+    // Set error state if any operand is an error.
+    if (error_found) {
+        cell->error_state = true;
+    } else {
+        cell->error_state = false;
+    }
+
+    // Set formula code based on operator and whether operands were cells.
     switch(op_char) {
         case '+': 
             cell->value = left_val + right_val;
+            if(left_is_cell && right_is_cell)
+                cell->formula = 10;
+            else if(left_is_cell)
+                cell->formula = 12;
+            else if(right_is_cell)
+                cell->formula = 13;
             break;
         case '-': 
             cell->value = left_val - right_val;
+            if(left_is_cell && right_is_cell)
+                cell->formula = 20;
+            else if(left_is_cell)
+                cell->formula = 22;
+            else if(right_is_cell)
+                cell->formula = 23;
             break;
         case '*': 
             cell->value = left_val * right_val;
+            if(left_is_cell && right_is_cell)
+                cell->formula = 40;
+            else if(left_is_cell)
+                cell->formula = 42;
+            else if(right_is_cell)
+                cell->formula = 43;
             break;
         case '/':
             if(right_val == 0) {
                 cell->error_state = true;
                 return CMD_DIV_BY_ZERO;
             }
-            cell->value = left_val / right_val;
+            if(!error_found)
+                cell->value = left_val / right_val;
+            if(left_is_cell && right_is_cell)
+                cell->formula = 30;
+            else if(left_is_cell)
+                cell->formula = 32;
+            else if(right_is_cell)
+                cell->formula = 33;
             break;
         default:
             return CMD_UNRECOGNIZED;
     }
+
     return CMD_OK;
 }
 
@@ -828,17 +1021,9 @@ CommandStatus evaluate_formula(Spreadsheet* sheet, Cell* cell, short row, short 
 CommandStatus set_cell_value(Spreadsheet* sheet, short row, short col, const char* expr, double* sleep_time) {
     Cell* cell = get_cell(sheet, row, col);
 
-    // Clear error state. Think about this if the command parsed by you is not valid and earlier if the cell was in error state.
-    cell->error_state = false;
-
     // Evaluate as a formula.
     CommandStatus status = evaluate_formula(sheet, cell, row, col, expr, sleep_time);
-    if (status == CMD_OK) {
-        // reevaluate_topologically(sheet, cell);
-    } else {
-        cell->error_state = true;
-        // propagate_errors(cell);
-    }
+    reevaluate_topologically(sheet, row, col, sleep_time);
     return status;
 }
 
@@ -971,7 +1156,7 @@ void free_spreadsheet(Spreadsheet* sheet) {
     int total = sheet->rows * sheet->cols;
     for (int i = 0; i < total; i++) {
         Cell* cell = &sheet->grid[i];
-        // avl_free(cell->children);
+        avl_free(cell->children);
     }
     free(sheet->grid);
     free(sheet);
@@ -985,16 +1170,22 @@ int main(int argc, char* argv[]) {
     }
     short rows = (short)atoi(argv[1]);
     short cols = (short)atoi(argv[2]);
+    double last_time = 0.0;
+    double command_time = 0.0;
+    clock_t start, end;
+    start = clock();
     Spreadsheet* sheet = create_spreadsheet(rows, cols);
+    end = clock();
+    command_time = (double)(end - start) / CLOCKS_PER_SEC;
+    last_time = command_time;
     if (!sheet) return 1;
     
     char input[128];
-    double last_time = 0.0;
     const char* last_status = "ok";
-    clock_t start, end;
     double sleep_time = 0.0;
-    
+    CommandStatus status;
     while (1) {
+        command_time = 0.0;
         print_spreadsheet(sheet);
         printf("[%.1f] (%s) > ", last_time, last_status);
         
@@ -1003,16 +1194,21 @@ int main(int argc, char* argv[]) {
         if (strcmp(input, "q") == 0) break;
         
         start = clock();
-        CommandStatus status=CMD_OK;
-        // CommandStatus status = handle_command(sheet, input, &sleep_time);
+        status = handle_command(sheet, input, &sleep_time);
         end = clock();
         
-        double command_time = (double)(end - start) / CLOCKS_PER_SEC;
+        command_time = (double)(end - start) / CLOCKS_PER_SEC;
+
+        if(sleep_time <= command_time) 
+            sleep_time = 0.0;
+        else
+            sleep_time -= command_time;
+
         last_time = command_time + sleep_time;
         if (sleep_time > 0) {
             sleep(sleep_time);
-            sleep_time = 0.0;
         }
+        sleep_time = 0.0;
         switch (status) {
             case CMD_OK: last_status = "ok"; break;
             case CMD_UNRECOGNIZED: last_status = "unrecognized cmd"; break;
