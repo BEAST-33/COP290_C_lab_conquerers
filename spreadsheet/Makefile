@@ -2,8 +2,12 @@ CC = gcc
 CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE
 LDFLAGS = -lm -pthread
 SRC = $(wildcard *.c)
-OBJ = $(SRC:.c=.o)
+OBJ = $(filter-out test_%.o, $(SRC:.c=.o))  # Exclude test files from main build
 EXEC = sheet
+TEST_SRC = test_spreadsheet.c
+TEST_RUNNER = test_runner.c
+TEST_RUNNER_EXEC = test_runner
+TEST_EXEC = test_spreadsheet
 
 all: $(EXEC)
 
@@ -13,13 +17,22 @@ $(EXEC): $(OBJ)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-test: $(EXEC)
-	./test_runner  # Replace with actual test command
+$(TEST_RUNNER_EXEC): $(TEST_RUNNER)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+test: $(EXEC) $(TEST_RUNNER_EXEC)
+	./$(TEST_RUNNER_EXEC)
+
+test_build: $(TEST_SRC)
+	$(CC) $(CFLAGS) -o $(TEST_EXEC) $^ $(LDFLAGS)
+
+test_run: test_build
+	./$(TEST_EXEC)
 
 report:
 	pdflatex report.tex
 
 clean:
-	rm -f $(OBJ) $(EXEC) report.pdf
+	rm -f $(OBJ) $(EXEC) report.pdf $(TEST_EXEC) $(TEST_RUNNER_EXEC) *.tmp
 
-.PHONY: all clean test report
+.PHONY: all clean test test_build test_run report
