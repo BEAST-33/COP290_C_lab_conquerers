@@ -20,8 +20,9 @@ $(EXEC): $(OBJ)
 $(TEST_RUNNER_EXEC): $(TEST_RUNNER)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test: $(EXEC) $(TEST_RUNNER_EXEC)
-	./$(TEST_RUNNER_EXEC)
+test: $(EXEC)
+	gcc -o test_runner test_runner.c
+	./test_runner
 
 test_build: $(TEST_SRC)
 	$(CC) $(CFLAGS) -o $(TEST_EXEC) $^ $(LDFLAGS)
