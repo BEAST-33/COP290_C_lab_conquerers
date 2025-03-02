@@ -1,0 +1,246 @@
+\documentclass{styles} 
+\usepackage{hyperref}
+
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}  % Clear all headers and footers
+
+% Redefine plain and empty styles to remove automatic headers
+\fancypagestyle{plain}{\fancyhf{}}
+\fancypagestyle{empty}{\fancyhf{}}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% POR FAVOR, NÃO FAÇA MUDANÇAS NESSE PADRÃO QUE ACARRETEM  EM
+%% ALTERAÇÃO NA FORMATAÇÃO FINAL DO TEXTO
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% POR FAVOR, ESCOLHA CONFORME O CASO
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\usepackage[brazil]{babel} % texto em Português
+%\usepackage[english]{babel} % texto em Inglês
+
+%\usepackage[latin1]{inputenc} % acentuação em Português ISO-8859-1
+\usepackage[utf8]{inputenc} % acentuação em Português UTF-8
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% POR FAVOR, NÃO ALTERAR
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\usepackage[T1]{fontenc}
+\usepackage{float}
+\usepackage{graphics}
+\usepackage{graphicx}
+\usepackage{epsfig}
+\usepackage{indentfirst}
+\usepackage{amsmath, amsfonts, amssymb, amsthm, mathtools}
+\usepackage{url}
+\usepackage{csquotes}
+% Ambientes pré-definidos
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}{Lemma}[section]
+\newtheorem{proposition}{Proposition}[section]
+\newtheorem{definition}{Definition}[section]
+\newtheorem{remark}{Remark}[section]
+\newtheorem{corollary}{Corollary}[section]
+\newtheorem{teorema}{Teorema}[section]
+\newtheorem{lema}{Lema}[section]
+\newtheorem{prop}{Proposi\c{c}\~ao}[section]
+\newtheorem{defi}{Defini\c{c}\~ao}[section]
+\newtheorem{obs}{Observa\c{c}\~ao}[section]
+\newtheorem{cor}{Corol\'ario}[section]
+
+% ref bibliográficas
+\usepackage[backend=biber, style=numeric-comp, maxnames=50]{biblatex}
+\addbibresource{refs.bib}
+\DeclareTextFontCommand{\emph}{\boldmath\bfseries}
+\DefineBibliographyStrings{brazil}{phdthesis = {Tese de doutorado}}
+\DefineBibliographyStrings{brazil}{mathesis = {Disserta\c{c}\~{a}o de mestrado}}
+\DefineBibliographyStrings{english}{mathesis = {Master dissertation}}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+
+\begin{document}
+\thispagestyle{empty}
+\pagestyle{empty}
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% TÍTULO E AUTORAS(ES)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\title{\bf C Lab: Spreadsheet Program}
+
+\author{
+    {\Large Karthik Manikandan R 2023CS10298} \\[5pt]
+    {\Large Yash Shindekar   2023CS10592}\\[5pt]
+    {\Large K.Divya Haasini  2023CS10958}\\
+}
+\criartitulo
+\vspace{-10mm}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% TEXTO
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{abstract}
+\fontsize{12pt}{13pt}\selectfont
+\hspace{-5mm}{\Large \bf Design decisions: }\\[9pt]
+{\fontsize{14pt}{11pt} \selectfont The program is designed to efficiently handle spreadsheet operations while maintaining dependencies using an AVL tree. The main objective is to ensure insertions, deletions, and updates while taking care of order and dependencies.By using AVL trees, the program can efficiently monitor dependent cells, ensuring recalculations happen in an efficient way. A contiguous memory block is used for the spreadsheet grid to enhance cache locality and access efficiency.}
+
+\noindent
+\end{abstract}
+
+\hspace{-5mm}{\Large \bf Challenges faced: }\vspace{5pt}
+
+{\fontsize{13.25pt}{11pt} \selectfont \textbf{Dependency Management:}
+\fontsize{13.5pt}{11pt} \selectfont Ensuring that when a cell’s value changes, all dependent cells are updated efficiently required implementing a topological sort.
+}\\[3pt]
+{\fontsize{13.25pt}{11pt} \selectfont \textbf{Circular References:}}
+{\fontsize{13.5pt}{11pt} \selectfont Detecting and preventing cyclic dependencies was necessary to avoid loops in formula evaluations.
+}\\[3pt]
+{\fontsize{13.25pt}{11pt} \selectfont \textbf{Error Handling:}} 
+{\fontsize{13.5pt}{11pt} \selectfont Managing division by zero, invalid cell references, sleep errors and range errors without breaking execution was necessary for correct implementation.
+}\\[3pt]
+{\fontsize{13.25pt}{11pt} \selectfont \textbf{Memory allocation:}} 
+{\fontsize{13.5pt}{11pt} \selectfont Efficient memory allocation was required to prevent excess consumption, especially with large spreadsheets. This required balancing AVL trees dynamically while minimizing unnecessary rotations.
+}
+\vspace{5mm}
+
+\section*{\fontsize{14.5}{11} \selectfont Program Structure}
+
+\vspace{-2mm} % Reduce extra space
+\subsection*{\fontsize{14}{11} \selectfont Functions Overview}
+
+\vspace{-0.25mm} % Adjust spacing as needed
+\subsubsection*{\fontsize{14}{11} \selectfont .Spreadsheet Management}
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{create\_spreadsheet():}}  
+{\fontsize{14pt}{11pt} \selectfont Allocates memory for the spreadsheet, initializes all cells with default values, and sets up the viewport and output settings. Ensures that memory constraints are respected.}
+
+\vspace{3pt} % Fine-tune spacing between functions
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{free\_spreadsheet():}}  
+{\fontsize{14pt}{11pt} \selectfont Frees the allocated memory for the spreadsheet, including deallocating all AVL trees used for dependency tracking in each cell.}
+
+\newpage
+
+\subsubsection*{\fontsize{14}{11} \selectfont .Cell Access}
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{get\_cell():}}  
+{\fontsize{14pt}{11pt} \selectfont  Returns a pointer to the cell at a given row and column using direct array access, improving efficiency.}
+
+\vspace{3pt} % Fine-tune spacing between functions
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{get\_cell\_check():}}  
+{\fontsize{14pt}{11pt} \selectfont Similar to get\_cell() but includes additional checks for safety when accessing specific indices.}
+
+\subsubsection*{\fontsize{14}{11} \selectfont .Dependency handling}
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{add\_child():}}  
+{\fontsize{14pt}{11pt} \selectfont  Inserts a new dependent (child) cell into the AVL tree of a parent cell.}
+
+\vspace{3pt} % Fine-tune spacing between functions
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{remove\_child():}}  
+{\fontsize{14pt}{11pt} \selectfont Removes a dependent cell from the AVL tree, ensuring that updates do not propagate incorrectly.}
+
+\vspace{3pt} % Fine-tune spacing between functions
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{remove\_all\_parents():}}  
+{\fontsize{14pt}{11pt} \selectfont Clears all parent dependencies of a cell, ensuring that outdated references do not cause incorrect recalculations.}
+
+\subsubsection*{\fontsize{14}{11} \selectfont .Formula evaluation}
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{evaluate\_formula():}}  
+{\fontsize{14pt}{11pt} \selectfont  Parses and evaluates expressions, supporting arithmetic operations, range-based functions and simple cell references. It updates the formula type stored in the cell and assigns dependency links accordingly.}
+
+\vspace{3pt} % Fine-tune spacing between functions
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{reevaluate\_topologically():}}  
+{\fontsize{14pt}{11pt} \selectfont Uses topological sorting to efficiently recompute dependent cells in the correct order, preventing circular dependencies and better efficiency.}
+
+\subsubsection*{\fontsize{14}{11} \selectfont .Error Handling}
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{parse\_cell\_reference():}}  
+{\fontsize{14pt}{11pt} \selectfont  Converts cell references (e.g., A1, B2) into numerical row-column indices. Detects inputs of wrong formats and ensures valid bounds.}
+
+\vspace{3pt} % Fine-tune spacing between functions
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{parse\_range():}}  
+{\fontsize{14pt}{11pt} \selectfont Parses a given range of cells and validates if the range is well-formed. Returns appropriate error message if the range is invalid.}
+
+\vspace{3pt} % Fine-tune spacing between functions
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{handle\_sleep():}}  
+{\fontsize{14pt}{11pt} \selectfont Processes the SLEEP command, allowing delays in execution based on cell values or direct numerical input.}
+
+\subsubsection*{\fontsize{14}{11} \selectfont .Command Execution}
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{handle\_command():}}  
+{\fontsize{14pt}{11pt} \selectfont  Processes input commands, identifies whether the input is a cell assignment, a formula, or a command like scrolling and calls the appropriate functions depending on the type of command.}
+
+\vspace{3pt} % Fine-tune spacing between functions
+\newpage
+
+
+\subsubsection*{\fontsize{15}{11} \selectfont .Test cases Covered in the Test Suite}
+\vspace{4pt}
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{1. Basic Operations:}}  
+{\fontsize{14pt}{11pt} \selectfont  Ensures that basic arithmetic operations and functions execute correctly and also verifies that formula updates dynamically when cell references change.}
+
+\vspace{6pt} % Fine-tune spacing between functions
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{2.Recalculation and SLEEP Function:}}  
+{\fontsize{14pt}{11pt} \selectfont Tests if spreadsheet correctly handles delayed execution due to sleep also checks if the changes made after a sleep period trigger the correct recomputation.}
+
+\vspace{6pt} % Fine-tune spacing between functions
+
+\noindent
+{\fontsize{14pt}{11pt} \selectfont \textbf{3.Invalid Range Error handling:}}  
+{\fontsize{14pt}{11pt} \selectfont Covers a case where a function like MAX(B1:A1)(an invalid range due to incorrect order) is used and ensures the program detects and reports an invalid range error}
+
+
+
+
+
+
+
+
+
+
+
+
+\newpage
+\href{https://github.com/BEAST-33/COP290_C_lab_conquerers}{{\Large \textbf{. Github Link}}}
+
+
+
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% REFS BIBLIOGRÁFICAS
+% POR FAVOR, NÃO ALTERAR
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\printbibliography
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\end{document}
+
+
+
+
