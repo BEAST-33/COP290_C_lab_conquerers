@@ -1,39 +1,37 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -std=c11 -D_GNU_SOURCE
 LDFLAGS = -lm -pthread
+
 SRC = $(wildcard *.c)
-OBJ = $(filter-out test_%.o, $(SRC:.c=.o))  # Exclude test files from main build
+OBJ = $(SRC:.c=.o)
+TEST_SRC = test_runner.c
+TEST_OBJ = test_runner.o
 EXEC = sheet
-TEST_SRC = test_spreadsheet.c
-TEST_RUNNER = test_runner.c
-TEST_RUNNER_EXEC = test_runner
-TEST_EXEC = test_spreadsheet
+
+# Filter out test files from main build
+MAIN_SRC = $(filter-out $(TEST_SRC), $(SRC))
+MAIN_OBJ = $(MAIN_SRC:.c=.o)
 
 all: $(EXEC)
 
-$(EXEC): $(OBJ)
+$(EXEC): $(MAIN_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(TEST_RUNNER_EXEC): $(TEST_RUNNER)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
-
-test: $(EXEC)
-	gcc -o test_runner test_runner.c
+# Build and run test suite
+test: test_runner
 	./test_runner
 
-test_build: $(TEST_SRC)
-	$(CC) $(CFLAGS) -o $(TEST_EXEC) $^ $(LDFLAGS)
+test_runner: $(TEST_OBJ)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-test_run: test_build
-	./$(TEST_EXEC)
-
+# Generate PDF report
 report:
 	pdflatex report.tex
 
 clean:
-	rm -f $(OBJ) $(EXEC) report.pdf $(TEST_EXEC) $(TEST_RUNNER_EXEC) *.tmp
+	rm -f $(OBJ) $(EXEC) test_runner *.o *.tmp report.pdf
 
-.PHONY: all clean test test_build test_run report
+.PHONY: all clean test report
